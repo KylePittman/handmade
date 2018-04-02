@@ -1,2 +1,2 @@
 @echo off
-notepad++ win32_handmade.cpp
+notepad++ w:\handmade\code\win32_handmade.cpp

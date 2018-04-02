@@ -9,26 +9,39 @@
 #define global_variable static
 #define internal static
 
+struct Win32_offscreen_buffer{
+	BITMAPINFO info;
+	void *memory;
+	int width;
+	int height;
+	int pitch;
+	int bytesPerPixel;
+};
+
+struct Win32WindowDimensions{
+	int width;
+	int height;
+};
 // TODO(KP): This is global for now
 global_variable bool running;
 
+global_variable Win32_offscreen_buffer backBuffer;
 
-global_variable BITMAPINFO bitmapInfo;
-global_variable void *bitmapMemory;
-global_variable int bitmapWidth;
-global_variable int bitmapHeight;
-global_variable int bytesPerPixel = 4;
+internal Win32WindowDimensions Win32GetDimensions(HWND window){
+	Win32WindowDimensions wd;
+	RECT clientRect;
+	GetClientRect(window, &clientRect);
+	wd.width = clientRect.right - clientRect.left;
+	wd.height = clientRect.bottom - clientRect.top;
+	return wd;
+}
 
-
-internal void renderWeirdGradient(int xOffset, int yOffset){
-	int width = bitmapWidth;
-	int height = bitmapHeight;
+internal void renderWeirdGradient(Win32_offscreen_buffer buffer, int xOffset, int yOffset){
 	
-	int pitch = bytesPerPixel*width;
-	uint8_t *row = (uint8_t *)bitmapMemory;
-	for(int y = 0; y < height; y++)	{
+	uint8_t *row = (uint8_t *)buffer.memory;
+	for(int y = 0; y < buffer.height; y++)	{
 		uint32_t *pixel = (uint32_t *)row;
-		for(int x = 0; x < width; x++)
+		for(int x = 0; x < buffer.width; x++)
 		{
 			uint8_t r = 0;
 			uint8_t g = (y+yOffset);
@@ -37,45 +50,45 @@ internal void renderWeirdGradient(int xOffset, int yOffset){
 			
 			*pixel++ = (r << 16 | g << 8 | b);
 		}
-		row+=pitch;
+		row+=buffer.pitch;
 	}
 }
 
-internal void Win32ResizeDIBSection(int width, int height){	
+internal void Win32ResizeDIBSection(Win32_offscreen_buffer *buffer, int width, int height){	
 	
-	if(bitmapMemory){
-		VirtualFree(bitmapMemory, NULL, MEM_RELEASE);
+	if(buffer->memory){
+		VirtualFree(buffer->memory, NULL, MEM_RELEASE);
 	}
 	
-	bitmapWidth = width;
-	bitmapHeight = height;
+	buffer->width = width;
+	buffer->height = height;
+	buffer->bytesPerPixel = 4;
 	
-	bitmapInfo.bmiHeader.biSize = sizeof(bitmapInfo.bmiHeader);
-	bitmapInfo.bmiHeader.biWidth = bitmapWidth;
-	bitmapInfo.bmiHeader.biHeight = -bitmapHeight;
-	bitmapInfo.bmiHeader.biPlanes = 1;
-	bitmapInfo.bmiHeader.biBitCount = 32;
-	bitmapInfo.bmiHeader.biCompression = BI_RGB;
-	bitmapInfo.bmiHeader.biSizeImage = 0;
-	bitmapInfo.bmiHeader.biXPelsPerMeter = 0;
-	bitmapInfo.bmiHeader.biYPelsPerMeter = 0;
-	bitmapInfo.bmiHeader.biClrImportant = 0;
+	buffer->info.bmiHeader.biSize = sizeof(buffer->info.bmiHeader);
+	buffer->info.bmiHeader.biWidth = buffer->width;
+	buffer->info.bmiHeader.biHeight = -buffer->height;
+	buffer->info.bmiHeader.biPlanes = 1;
+	buffer->info.bmiHeader.biBitCount = 32;
+	buffer->info.bmiHeader.biCompression = BI_RGB;
+	buffer->info.bmiHeader.biSizeImage = 0;
+	buffer->info.bmiHeader.biXPelsPerMeter = 0;
+	buffer->info.bmiHeader.biYPelsPerMeter = 0;
+	buffer->info.bmiHeader.biClrImportant = 0;
 
-	int bitmapMemorySize = bitmapWidth * bitmapHeight * bytesPerPixel;
-	bitmapMemory = VirtualAlloc(0, bitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+	int bitmapMemorySize = buffer->width * buffer->height * buffer->bytesPerPixel;
+	buffer->memory = VirtualAlloc(0, bitmapMemorySize, MEM_COMMIT, PAGE_READWRITE);
+	
+	buffer->pitch = buffer->bytesPerPixel*buffer->width;
 }
 
-internal void Win32UpdateWindow(HDC context, RECT *clientRect, int x, int y, int width, int height){
-	int windowWidth = clientRect->right - clientRect->left;
-	int windowHeight = clientRect->bottom - clientRect->top;
-	
+internal void Win32BufferToWindow(HDC context, int windowWidth, int windowHeight, 
+									Win32_offscreen_buffer buffer, int x, int y, 
+									int width, int height){	
 	StretchDIBits(context, 
-					/*x, y, width, height,
-					x, y, width, height,*/
-					0, 0, bitmapWidth, bitmapHeight,
 					0, 0, windowWidth, windowHeight,
-					bitmapMemory,
-					&bitmapInfo,
+					0, 0, buffer.width, buffer.height,
+					buffer.memory,
+					&buffer.info,
 					DIB_RGB_COLORS, SRCCOPY);
 }
 
@@ -91,11 +104,6 @@ Win32MainWindowCallback(HWND   window,
 	{		
 		case WM_SIZE:
 		{
-			RECT clientRect;
-			GetClientRect(window, &clientRect);
-			int width = clientRect.right - clientRect.left;
-			int height = clientRect.bottom - clientRect.top;
-			Win32ResizeDIBSection(width, height);
 			OutputDebugStringA("WM_SIZE\n");
 			
 		} break;
@@ -125,9 +133,8 @@ Win32MainWindowCallback(HWND   window,
 			int height = paint.rcPaint.bottom - y;
 			int width = paint.rcPaint.right - x;
 			
-			RECT clientRect;
-			GetClientRect(window, &clientRect);
-			Win32UpdateWindow(deviceContext, &clientRect, x, y, width, height);
+			Win32WindowDimensions wd = Win32GetDimensions(window);
+			Win32BufferToWindow(deviceContext, wd.width, wd.height, backBuffer, x, y, width, height);
 			
 			EndPaint(window, &paint);
 		} break;
@@ -144,8 +151,9 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 {
 	WNDCLASS windowClass = {};
 	
-		//TODO(KP): Check if redraws are necessary
-		windowClass.style = CS_OWNDC|CS_HREDRAW|CS_VREDRAW;
+	Win32ResizeDIBSection(&backBuffer, 1280, 720);
+	
+		windowClass.style = CS_HREDRAW|CS_VREDRAW;
 		windowClass.lpfnWndProc = Win32MainWindowCallback;
 		windowClass.hInstance = hInstance;
 		//windowClass.hIcon = ;
@@ -170,15 +178,11 @@ int CALLBACK WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
 					TranslateMessage(&message);
 					DispatchMessage(&message);
 				}
-				renderWeirdGradient(xOffset,yOffset);
+				renderWeirdGradient(backBuffer, xOffset, yOffset);
 				HDC context = GetDC(window);
-				RECT clientRect;
-				GetClientRect(window, &clientRect);
+				Win32WindowDimensions wd = Win32GetDimensions(window);
 				
-				int windowWidth = clientRect.right - clientRect.left;
-				int windowHeight = clientRect.bottom - clientRect.top;
-				
-				Win32UpdateWindow(context, &clientRect, 0, 0, windowWidth, windowHeight);
+				Win32BufferToWindow(context, wd.width, wd.height, backBuffer, 0, 0, wd.width, wd.height);
 				xOffset++;
 				yOffset++;
 				ReleaseDC(window, context);
